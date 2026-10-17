@@ -1,0 +1,63 @@
+# Checks Home2Health from outside the VPS every 5 minutes. A failure opens one issue labelled
+# `down` (GitHub emails the watchers); recovery closes it. Public repo: Actions minutes are free.
+# ponytail: GitHub's cron can run a few minutes late; move to a paid checker if minutes matter.
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+    - cron: "0 12 * * 1" # weekly keepalive: GitHub disables schedules after 60 days without commits
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: uptime
+
+jobs:
+  check:
+    if: github.event.schedule != '0 12 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          down=""
+          for url in \
+            https://api.home2health.care/health \
+            https://admin.home2health.care/ \
+            https://app.home2health.care/ \
+            https://files.home2health.care/minio/health/live; do
+            ok=0
+            for try in 1 2 3; do
+              code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$url" || true)
+              case "$code" in 2??|3??) ok=1; break ;; esac
+              sleep 10
+            done
+            [ "$ok" = 1 ] || down="$down $url ($code)"
+          done
+          open=$(gh issue list -l down --state open --json number -q '.[0].number')
+          if [ -n "$down" ] && [ -z "$open" ]; then
+            gh issue create -l down -t "Caído:$down" \
+              -b "Detectado $(date -u +%FT%TZ). Run: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
+          fi
+          if [ -z "$down" ] && [ -n "$open" ]; then
+            gh issue close "$open" -c "Recuperado $(date -u +%FT%TZ)."
+          fi
+          echo "caídos:${down:- ninguno}"
+          [ -z "$down" ]
+
+  keepalive:
+    if: github.event.schedule == '0 12 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git commit --allow-empty -m "chore: keepalive"
+          git push
